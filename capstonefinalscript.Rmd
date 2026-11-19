@@ -1,0 +1,692 @@
+---
+title: "STAT Capstone"
+output: html_document
+date: "2026-03-15"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(survey)
+library(car)
+
+data <- read.csv("data/combined_data.csv")
+
+# Replace near-zero corrupted values (e.g. 5.397e-79) with NA across all numeric columns
+numeric_cols <- sapply(data, is.numeric)
+data[numeric_cols] <- lapply(data[numeric_cols], function(x) {
+  x[abs(x) < 1e-10 & x != 0] <- NA
+  return(x)
+})
+
+# Recode gender
+data$Female <- ifelse(data$RIAGENDR == 2, 1, 0)
+
+# Center variables for interaction
+data$Fiber_c <- scale(data$total_fiber, center = TRUE, scale = FALSE)
+data$PAD680_c <- scale(data$PAD680, center = TRUE, scale = FALSE)
+data$Sugar_c <- scale(data$total_sugar, center = TRUE, scale = FALSE)
+data$Protein_c <- scale(data$total_protein, center = TRUE, scale = FALSE)
+data$Calories_c <- scale(data$total_calories, center = TRUE, scale = FALSE)
+
+# Compute total weekly activity minutes from moderate + vigorous leisure-time PA
+# Convert frequency to weekly based on reported unit (D=daily, W=weekly, M=monthly, Y=yearly)
+freq_to_weekly <- function(freq, unit) {
+  ifelse(is.na(freq) | freq >= 9999, NA,
+  ifelse(unit == "b'D'", freq * 7,
+  ifelse(unit == "b'W'", freq,
+  ifelse(unit == "b'M'", freq / 4.33,
+  ifelse(unit == "b'Y'", freq / 52, 0)))))
+}
+
+data$mod_weekly_freq <- freq_to_weekly(data$PAD790Q, data$PAD790U)
+data$PAD800_clean <- ifelse(data$PAD800 >= 9999, NA, data$PAD800)
+data$mod_weekly_min <- data$mod_weekly_freq * data$PAD800_clean
+
+data$vig_weekly_freq <- freq_to_weekly(data$PAD810Q, data$PAD810U)
+data$PAD820_clean <- ifelse(data$PAD820 >= 9999, NA, data$PAD820)
+data$vig_weekly_min <- data$vig_weekly_freq * data$PAD820_clean
+
+# Blank unit = no activity reported = 0 minutes
+data$mod_weekly_min[data$PAD790U %in% c("b''", "")] <- 0
+data$vig_weekly_min[data$PAD810U %in% c("b''", "")] <- 0
+
+# Total weekly activity: moderate + 2*vigorous (WHO MET-equivalent convention)
+data$total_activity_min <- ifelse(
+  !is.na(data$mod_weekly_min) & !is.na(data$vig_weekly_min),
+  data$mod_weekly_min + 2 * data$vig_weekly_min, NA)
+data$total_activity_min <- ifelse(is.na(data$total_activity_min) & !is.na(data$mod_weekly_min),
+  data$mod_weekly_min, data$total_activity_min)
+data$total_activity_min <- ifelse(is.na(data$total_activity_min) & !is.na(data$vig_weekly_min),
+  2 * data$vig_weekly_min, data$total_activity_min)
+
+data$Activity_c <- scale(data$total_activity_min, center = TRUE, scale = FALSE)
+```
+
+```{r}
+# Missing Data Audit
+# OLS complete cases: 4,493/6,751 (67%). Multivariate: 2,461/6,751 (36%) due to glucose subsample.
+key_vars <- c("BMXBMI", "LBXTC", "BMXWAIST", "LBDGLUSI", "PAD680",
+              "total_calories", "total_sugar", "total_fiber", "total_protein",
+              "RIDAGEYR", "Female")
+
+cat("=== Non-NA counts per variable ===\n")
+for (v in key_vars) {
+  cat(sprintf("  %s: %d / %d\n", v, sum(!is.na(data[[v]])), nrow(data)))
+}
+
+# Effective sample size for OLS models (complete cases across all OLS predictors + outcomes)
+ols_vars <- c("BMXBMI", "LBXTC", "total_calories", "total_sugar", "total_fiber",
+              "total_protein", "PAD680", "total_activity_min", "RIDAGEYR", "Female")
+cat(sprintf("\nComplete cases for OLS models: %d / %d\n",
+            sum(complete.cases(data[ols_vars])), nrow(data)))
+
+# Effective sample size for multivariate models
+multi_vars <- c("BMXBMI", "BMXWAIST", "LBDGLUSI", "LBXTC",
+                "total_calories", "total_sugar", "total_protein",
+                "total_fiber", "PAD680", "total_activity_min", "RIDAGEYR", "Female")
+cat(sprintf("Complete cases for multivariate models: %d / %d\n",
+            sum(complete.cases(data[multi_vars])), nrow(data)))
+```
+
+```{r}
+# Survey Design — accounts for NHANES complex sampling
+nhanes_design <- svydesign(
+  id = ~SDMVPSU,
+  strata = ~SDMVSTRA,
+  weights = ~WTMEC2YR,
+  data = data,
+  nest = TRUE
+)
+```
+
+```{r}
+# Survey-Weighted OLS — Main Effects
+# BMI: Fiber still strongest (p<0.001), sedentary time still sig (p=0.01), total_activity_min not sig (p=0.23).
+#   More fiber = lower BMI. More sedentary time = higher BMI. Calories, sugar, protein not significant.
+# Cholesterol: total_activity_min borderline (p=0.07), age and gender still primary.
+# Glucose: total_activity_min IS significant (p=0.003) — more activity = lower glucose. New finding!
+
+svy_bmi <- svyglm(
+  BMXBMI ~ total_calories + total_sugar + total_fiber + total_protein +
+    PAD680 + total_activity_min + RIDAGEYR + Female,
+  design = nhanes_design
+)
+
+summary(svy_bmi)
+
+# Survey-Weighted OLS for Blood Cholesterol
+svy_chol <- svyglm(
+  LBXTC ~ total_calories + total_sugar + total_fiber + total_protein +
+    PAD680 + total_activity_min + RIDAGEYR + Female,
+  design = nhanes_design
+)
+
+summary(svy_chol)
+
+# Survey-Weighted OLS for Blood Glucose
+svy_glucose_ols <- svyglm(
+  LBDGLUSI ~ total_calories + total_sugar + total_fiber + total_protein +
+    PAD680 + total_activity_min + RIDAGEYR + Female,
+  design = nhanes_design
+)
+
+summary(svy_glucose_ols)
+```
+
+```{r}
+# VIF — All values under 5 (calories highest at 4.85), activity VIF only 1.01. No multicollinearity issues.
+
+lm_for_vif <- lm(
+  BMXBMI ~ total_calories + total_sugar + total_fiber + total_protein +
+    PAD680 + total_activity_min + RIDAGEYR + Female,
+  data = data
+)
+
+cat("=== Variance Inflation Factors ===\n")
+vif(lm_for_vif)
+```
+
+```{r}
+# Regression Diagnostics — Q-Q shows slight tail departures but no major violations.
+# No high-leverage outliers driving results. Residuals look reasonable.
+
+par(mfrow = c(2, 2))
+plot(lm_for_vif, main = "BMI Model Diagnostics")
+```
+
+```{r}
+# Fiber x Activity(leisure) Interaction
+# BMI: Interaction not significant (p=0.78). Fiber's BMI-lowering effect doesn't depend on activity.
+# Cholesterol: Interaction not significant (p=0.36). Same story.
+# ANOVA nested model tests confirm: adding the interaction doesn't improve fit for either outcome.
+svy_int_bmi <- svyglm(
+  BMXBMI ~ total_calories + total_sugar + total_protein +
+    Fiber_c + PAD680_c + Activity_c + Fiber_c:PAD680_c +
+    RIDAGEYR + Female,
+  design = nhanes_design
+)
+
+summary(svy_int_bmi)
+
+# Interaction model for Blood Cholesterol
+svy_int_chol <- svyglm(
+  LBXTC ~ total_calories + total_sugar + total_protein +
+    Fiber_c + PAD680_c + Activity_c + Fiber_c:PAD680_c +
+    RIDAGEYR + Female,
+  design = nhanes_design
+)
+
+summary(svy_int_chol)
+
+# Test whether the interaction term is significant (compare nested models)
+svy_int_bmi_base <- svyglm(
+  BMXBMI ~ total_calories + total_sugar + total_protein +
+    Fiber_c + PAD680_c + Activity_c + RIDAGEYR + Female,
+  design = nhanes_design
+)
+
+cat("=== Interaction Test for BMI ===\n")
+anova(svy_int_bmi_base, svy_int_bmi)
+
+svy_int_chol_base <- svyglm(
+  LBXTC ~ total_calories + total_sugar + total_protein +
+    Fiber_c + PAD680_c + Activity_c + RIDAGEYR + Female,
+  design = nhanes_design
+)
+
+cat("=== Interaction Test for Cholesterol ===\n")
+anova(svy_int_chol_base, svy_int_chol)
+```
+
+```{r}
+# Multivariate Analysis — separate svyglm models per outcome (no survey-weighted MANOVA in R).
+# Waist: Fiber (p=0.002) and sedentary time (p=0.004) still sig, activity not sig (p=0.20).
+# Fiber x Activity(leisure) interaction for waist: borderline (p=0.07).
+# Glucose: Only age (p<0.001) and gender (p<0.001) significant. No diet/activity effects.
+# Joint tests: Fiber significant for BMI + waist, not cholesterol/glucose.
+#              Activity significant for BMI + waist, not cholesterol/glucose.
+#              Fiber x Activity interaction not significant for any outcome.
+svy_waist <- svyglm(
+  BMXWAIST ~ total_calories + total_sugar + total_protein +
+    Fiber_c + PAD680_c + Activity_c + Fiber_c:PAD680_c +
+    RIDAGEYR + Female,
+  design = nhanes_design
+)
+
+svy_glucose <- svyglm(
+  LBDGLUSI ~ total_calories + total_sugar + total_protein +
+    Fiber_c + PAD680_c + Activity_c + Fiber_c:PAD680_c +
+    RIDAGEYR + Female,
+  design = nhanes_design
+)
+
+cat("=== Survey-Weighted Results: Waist Circumference ===\n")
+summary(svy_waist)
+
+cat("\n=== Survey-Weighted Results: Glucose ===\n")
+summary(svy_glucose)
+
+# Joint significance tests for key predictors across all 4 outcome models
+cat("\n=== Joint Significance of Fiber (across all outcome models) ===\n")
+regTermTest(svy_int_bmi, "Fiber_c")
+regTermTest(svy_int_chol, "Fiber_c")
+regTermTest(svy_waist, "Fiber_c")
+regTermTest(svy_glucose, "Fiber_c")
+
+cat("\n=== Joint Significance of Activity (across all outcome models) ===\n")
+regTermTest(svy_int_bmi, "PAD680_c")
+regTermTest(svy_int_chol, "PAD680_c")
+regTermTest(svy_waist, "PAD680_c")
+regTermTest(svy_glucose, "PAD680_c")
+
+cat("\n=== Joint Significance of Fiber x Activity Interaction ===\n")
+regTermTest(svy_int_bmi, "Fiber_c:PAD680_c")
+regTermTest(svy_int_chol, "Fiber_c:PAD680_c")
+regTermTest(svy_waist, "Fiber_c:PAD680_c")
+regTermTest(svy_glucose, "Fiber_c:PAD680_c")
+```
+
+```{r}
+# Sugar x Activity(leisure) interactions: no longer significant when real activity is in the model.
+# Previously BMI (p=0.008) and waist (p=0.006) were significant without total_activity_min.
+# Adding leisure-time activity removes the confounding artifact.
+
+svy_sugar_act_bmi <- svyglm(
+  BMXBMI ~ total_calories + total_protein + Fiber_c +
+    Sugar_c + PAD680_c + Activity_c + Sugar_c:PAD680_c +
+    RIDAGEYR + Female,
+  design = nhanes_design
+)
+summary(svy_sugar_act_bmi)
+
+svy_sugar_act_chol <- svyglm(
+  LBXTC ~ total_calories + total_protein + Fiber_c +
+    Sugar_c + PAD680_c + Activity_c + Sugar_c:PAD680_c +
+    RIDAGEYR + Female,
+  design = nhanes_design
+)
+summary(svy_sugar_act_chol)
+
+svy_sugar_act_waist <- svyglm(
+  BMXWAIST ~ total_calories + total_protein + Fiber_c +
+    Sugar_c + PAD680_c + Activity_c + Sugar_c:PAD680_c +
+    RIDAGEYR + Female,
+  design = nhanes_design
+)
+summary(svy_sugar_act_waist)
+
+svy_sugar_act_glucose <- svyglm(
+  LBDGLUSI ~ total_calories + total_protein + Fiber_c +
+    Sugar_c + PAD680_c + Activity_c + Sugar_c:PAD680_c +
+    RIDAGEYR + Female,
+  design = nhanes_design
+)
+summary(svy_sugar_act_glucose)
+```
+
+```{r}
+# Protein x Activity(leisure) interaction for BMI: borderline significant (p=0.05).
+# Previously only cholesterol significant (p=0.013). With total_activity_min in the model,
+# the protein x sedentary interaction shifts.
+
+svy_prot_act_bmi <- svyglm(
+  BMXBMI ~ total_calories + total_sugar + Fiber_c +
+    Protein_c + PAD680_c + Activity_c + Protein_c:PAD680_c +
+    RIDAGEYR + Female,
+  design = nhanes_design
+)
+summary(svy_prot_act_bmi)
+
+svy_prot_act_chol <- svyglm(
+  LBXTC ~ total_calories + total_sugar + Fiber_c +
+    Protein_c + PAD680_c + Activity_c + Protein_c:PAD680_c +
+    RIDAGEYR + Female,
+  design = nhanes_design
+)
+summary(svy_prot_act_chol)
+
+svy_prot_act_waist <- svyglm(
+  BMXWAIST ~ total_calories + total_sugar + Fiber_c +
+    Protein_c + PAD680_c + Activity_c + Protein_c:PAD680_c +
+    RIDAGEYR + Female,
+  design = nhanes_design
+)
+summary(svy_prot_act_waist)
+
+svy_prot_act_glucose <- svyglm(
+  LBDGLUSI ~ total_calories + total_sugar + Fiber_c +
+    Protein_c + PAD680_c + Activity_c + Protein_c:PAD680_c +
+    RIDAGEYR + Female,
+  design = nhanes_design
+)
+summary(svy_prot_act_glucose)
+```
+
+```{r}
+# Fiber x Age — not significant for any outcome (all p>0.15). Fiber's effect is consistent across ages.
+
+svy_fiber_age_bmi <- svyglm(
+  BMXBMI ~ total_calories + total_sugar + total_protein +
+    Fiber_c + PAD680_c + Activity_c + Fiber_c:RIDAGEYR +
+    RIDAGEYR + Female,
+  design = nhanes_design
+)
+summary(svy_fiber_age_bmi)
+
+svy_fiber_age_chol <- svyglm(
+  LBXTC ~ total_calories + total_sugar + total_protein +
+    Fiber_c + PAD680_c + Activity_c + Fiber_c:RIDAGEYR +
+    RIDAGEYR + Female,
+  design = nhanes_design
+)
+summary(svy_fiber_age_chol)
+
+svy_fiber_age_waist <- svyglm(
+  BMXWAIST ~ total_calories + total_sugar + total_protein +
+    Fiber_c + PAD680_c + Activity_c + Fiber_c:RIDAGEYR +
+    RIDAGEYR + Female,
+  design = nhanes_design
+)
+summary(svy_fiber_age_waist)
+
+svy_fiber_age_glucose <- svyglm(
+  LBDGLUSI ~ total_calories + total_sugar + total_protein +
+    Fiber_c + PAD680_c + Activity_c + Fiber_c:RIDAGEYR +
+    RIDAGEYR + Female,
+  design = nhanes_design
+)
+summary(svy_fiber_age_glucose)
+```
+
+```{r}
+# Calories x Activity — not significant for any outcome (closest: waist p=0.095). No interaction.
+
+svy_cal_act_bmi <- svyglm(
+  BMXBMI ~ total_sugar + total_protein + Fiber_c +
+    Calories_c + PAD680_c + Activity_c + Calories_c:PAD680_c +
+    RIDAGEYR + Female,
+  design = nhanes_design
+)
+summary(svy_cal_act_bmi)
+
+svy_cal_act_chol <- svyglm(
+  LBXTC ~ total_sugar + total_protein + Fiber_c +
+    Calories_c + PAD680_c + Activity_c + Calories_c:PAD680_c +
+    RIDAGEYR + Female,
+  design = nhanes_design
+)
+summary(svy_cal_act_chol)
+
+svy_cal_act_waist <- svyglm(
+  BMXWAIST ~ total_sugar + total_protein + Fiber_c +
+    Calories_c + PAD680_c + Activity_c + Calories_c:PAD680_c +
+    RIDAGEYR + Female,
+  design = nhanes_design
+)
+summary(svy_cal_act_waist)
+
+svy_cal_act_glucose <- svyglm(
+  LBDGLUSI ~ total_sugar + total_protein + Fiber_c +
+    Calories_c + PAD680_c + Activity_c + Calories_c:PAD680_c +
+    RIDAGEYR + Female,
+  design = nhanes_design
+)
+summary(svy_cal_act_glucose)
+```
+
+```{r}
+# Fiber x Leisure Activity — tests whether fiber's protective effect depends on exercise level.
+
+svy_fiber_lact_bmi <- svyglm(
+  BMXBMI ~ total_calories + total_sugar + total_protein +
+    Fiber_c + PAD680_c + Activity_c + Fiber_c:Activity_c +
+    RIDAGEYR + Female,
+  design = nhanes_design
+)
+summary(svy_fiber_lact_bmi)
+
+svy_fiber_lact_chol <- svyglm(
+  LBXTC ~ total_calories + total_sugar + total_protein +
+    Fiber_c + PAD680_c + Activity_c + Fiber_c:Activity_c +
+    RIDAGEYR + Female,
+  design = nhanes_design
+)
+summary(svy_fiber_lact_chol)
+
+svy_fiber_lact_waist <- svyglm(
+  BMXWAIST ~ total_calories + total_sugar + total_protein +
+    Fiber_c + PAD680_c + Activity_c + Fiber_c:Activity_c +
+    RIDAGEYR + Female,
+  design = nhanes_design
+)
+summary(svy_fiber_lact_waist)
+
+svy_fiber_lact_glucose <- svyglm(
+  LBDGLUSI ~ total_calories + total_sugar + total_protein +
+    Fiber_c + PAD680_c + Activity_c + Fiber_c:Activity_c +
+    RIDAGEYR + Female,
+  design = nhanes_design
+)
+summary(svy_fiber_lact_glucose)
+```
+
+```{r}
+# Sugar x Leisure Activity — tests whether activity buffers sugar's effects on health outcomes.
+
+svy_sugar_lact_bmi <- svyglm(
+  BMXBMI ~ total_calories + total_protein + Fiber_c +
+    Sugar_c + PAD680_c + Activity_c + Sugar_c:Activity_c +
+    RIDAGEYR + Female,
+  design = nhanes_design
+)
+summary(svy_sugar_lact_bmi)
+
+svy_sugar_lact_chol <- svyglm(
+  LBXTC ~ total_calories + total_protein + Fiber_c +
+    Sugar_c + PAD680_c + Activity_c + Sugar_c:Activity_c +
+    RIDAGEYR + Female,
+  design = nhanes_design
+)
+summary(svy_sugar_lact_chol)
+
+svy_sugar_lact_waist <- svyglm(
+  BMXWAIST ~ total_calories + total_protein + Fiber_c +
+    Sugar_c + PAD680_c + Activity_c + Sugar_c:Activity_c +
+    RIDAGEYR + Female,
+  design = nhanes_design
+)
+summary(svy_sugar_lact_waist)
+
+svy_sugar_lact_glucose <- svyglm(
+  LBDGLUSI ~ total_calories + total_protein + Fiber_c +
+    Sugar_c + PAD680_c + Activity_c + Sugar_c:Activity_c +
+    RIDAGEYR + Female,
+  design = nhanes_design
+)
+summary(svy_sugar_lact_glucose)
+```
+
+```{r}
+# Protein x Leisure Activity — tests whether protein's lean mass effect depends on exercise.
+
+svy_prot_lact_bmi <- svyglm(
+  BMXBMI ~ total_calories + total_sugar + Fiber_c +
+    Protein_c + PAD680_c + Activity_c + Protein_c:Activity_c +
+    RIDAGEYR + Female,
+  design = nhanes_design
+)
+summary(svy_prot_lact_bmi)
+
+svy_prot_lact_chol <- svyglm(
+  LBXTC ~ total_calories + total_sugar + Fiber_c +
+    Protein_c + PAD680_c + Activity_c + Protein_c:Activity_c +
+    RIDAGEYR + Female,
+  design = nhanes_design
+)
+summary(svy_prot_lact_chol)
+
+svy_prot_lact_waist <- svyglm(
+  BMXWAIST ~ total_calories + total_sugar + Fiber_c +
+    Protein_c + PAD680_c + Activity_c + Protein_c:Activity_c +
+    RIDAGEYR + Female,
+  design = nhanes_design
+)
+summary(svy_prot_lact_waist)
+
+svy_prot_lact_glucose <- svyglm(
+  LBDGLUSI ~ total_calories + total_sugar + Fiber_c +
+    Protein_c + PAD680_c + Activity_c + Protein_c:Activity_c +
+    RIDAGEYR + Female,
+  design = nhanes_design
+)
+summary(svy_prot_lact_glucose)
+```
+
+```{r}
+# Calories x Leisure Activity — tests whether activity modifies calorie-outcome relationships.
+
+svy_cal_lact_bmi <- svyglm(
+  BMXBMI ~ total_sugar + total_protein + Fiber_c +
+    Calories_c + PAD680_c + Activity_c + Calories_c:Activity_c +
+    RIDAGEYR + Female,
+  design = nhanes_design
+)
+summary(svy_cal_lact_bmi)
+
+svy_cal_lact_chol <- svyglm(
+  LBXTC ~ total_sugar + total_protein + Fiber_c +
+    Calories_c + PAD680_c + Activity_c + Calories_c:Activity_c +
+    RIDAGEYR + Female,
+  design = nhanes_design
+)
+summary(svy_cal_lact_chol)
+
+svy_cal_lact_waist <- svyglm(
+  BMXWAIST ~ total_sugar + total_protein + Fiber_c +
+    Calories_c + PAD680_c + Activity_c + Calories_c:Activity_c +
+    RIDAGEYR + Female,
+  design = nhanes_design
+)
+summary(svy_cal_lact_waist)
+
+svy_cal_lact_glucose <- svyglm(
+  LBDGLUSI ~ total_sugar + total_protein + Fiber_c +
+    Calories_c + PAD680_c + Activity_c + Calories_c:Activity_c +
+    RIDAGEYR + Female,
+  design = nhanes_design
+)
+summary(svy_cal_lact_glucose)
+```
+
+```{r}
+# === BODY COMPOSITION ANALYSIS ===
+# BMI alone can't separate fat from muscle. Waist circumference measures abdominal fat specifically.
+# Waist-to-BMI ratio: higher = more fat relative to size, lower = more lean mass.
+data$waist_bmi_ratio <- data$BMXWAIST / data$BMXBMI
+
+# Update survey design with new variable
+nhanes_design <- svydesign(
+  id = ~SDMVPSU, strata = ~SDMVSTRA, weights = ~WTMEC2YR,
+  data = data, nest = TRUE
+)
+```
+
+```{r}
+# Waist-to-BMI Ratio: Main Effects
+# Protein still significant (p=0.006, negative) — more protein = lower ratio = more lean mass. Activity not sig.
+# Fiber significant (p=0.001, positive) — more fiber = higher ratio = less mass overall (leaner people weigh less).
+# Age (p<0.001) and Female (p<0.001) also significant — older and male = higher ratio.
+
+svy_ratio_main <- svyglm(
+  waist_bmi_ratio ~ total_calories + total_sugar + total_fiber + total_protein +
+    PAD680 + total_activity_min + RIDAGEYR + Female,
+  design = nhanes_design
+)
+summary(svy_ratio_main)
+```
+
+```{r}
+# Waist-to-BMI Ratio: Protein x Activity — not significant (p=0.66).
+# Protein's lean-mass benefit is the same regardless of sedentary behavior.
+
+svy_ratio_prot_act <- svyglm(
+  waist_bmi_ratio ~ total_calories + total_sugar + Fiber_c + Protein_c +
+    PAD680_c + Activity_c + Protein_c:PAD680_c + RIDAGEYR + Female,
+  design = nhanes_design
+)
+summary(svy_ratio_prot_act)
+```
+
+```{r}
+# Waist-to-BMI Ratio: Protein x Gender — not significant (p=0.12).
+# Protein's lean-mass effect is similar for males and females.
+
+svy_ratio_prot_gender <- svyglm(
+  waist_bmi_ratio ~ total_calories + total_sugar + Fiber_c + Protein_c +
+    PAD680_c + Activity_c + Protein_c:Female + RIDAGEYR + Female,
+  design = nhanes_design
+)
+summary(svy_ratio_prot_gender)
+```
+
+```{r}
+# Waist as Primary Outcome: Main Effects — protein NOT significant (p=0.59).
+# Protein does not add belly fat. Fiber (p=0.001) and sedentary time (p=0.002) still significant.
+# Key: protein is invisible here because it only affects lean mass, not abdominal fat.
+
+svy_waist_main <- svyglm(
+  BMXWAIST ~ total_calories + total_sugar + total_fiber + total_protein +
+    PAD680 + total_activity_min + RIDAGEYR + Female,
+  design = nhanes_design
+)
+summary(svy_waist_main)
+```
+
+```{r}
+# Waist: Protein x Activity — not significant (p=0.42). Protein doesn't affect belly fat regardless of activity.
+
+svy_waist_prot_act <- svyglm(
+  BMXWAIST ~ total_calories + total_sugar + Fiber_c + Protein_c +
+    PAD680_c + Activity_c + Protein_c:PAD680_c + RIDAGEYR + Female,
+  design = nhanes_design
+)
+summary(svy_waist_prot_act)
+```
+
+```{r}
+# Waist: Protein x Gender — not significant (p=0.21). Same null effect for both sexes.
+
+svy_waist_prot_gender <- svyglm(
+  BMXWAIST ~ total_calories + total_sugar + Fiber_c + Protein_c +
+    PAD680_c + Activity_c + Protein_c:Female + RIDAGEYR + Female,
+  design = nhanes_design
+)
+summary(svy_waist_prot_gender)
+```
+
+```{r}
+# BMI Controlling for Waist — this isolates lean mass by holding abdominal fat constant.
+# PROTEIN BECOMES SIGNIFICANT (p=0.009). At the same waist size, more protein = higher BMI.
+# KEY FINDING: protein builds lean mass, not fat. BMI alone hid this because muscle and fat both raise BMI.
+
+svy_bmi_adj_waist <- svyglm(
+  BMXBMI ~ BMXWAIST + total_calories + total_sugar + total_fiber + total_protein +
+    PAD680 + total_activity_min + RIDAGEYR + Female,
+  design = nhanes_design
+)
+summary(svy_bmi_adj_waist)
+```
+
+```{r}
+# BMI|Waist: Protein x Activity — borderline (p=0.07). Suggestive trend but not conclusive.
+
+svy_bmi_adj_prot_act <- svyglm(
+  BMXBMI ~ BMXWAIST + total_calories + total_sugar + Fiber_c + Protein_c +
+    PAD680_c + Activity_c + Protein_c:PAD680_c + RIDAGEYR + Female,
+  design = nhanes_design
+)
+summary(svy_bmi_adj_prot_act)
+```
+
+```{r}
+# BMI|Waist: Protein x Gender — not significant (p=0.15). Lean-mass effect similar across sexes.
+
+svy_bmi_adj_prot_gender <- svyglm(
+  BMXBMI ~ BMXWAIST + total_calories + total_sugar + Fiber_c + Protein_c +
+    PAD680_c + Activity_c + Protein_c:Female + RIDAGEYR + Female,
+  design = nhanes_design
+)
+summary(svy_bmi_adj_prot_gender)
+```
+
+```{r}
+# === PROTEIN SUMMARY TABLE ===
+# BMI alone: p=0.10 (not sig) — protein hidden by fat/muscle confusion.
+# Waist alone: p=0.59 (not sig) — protein doesn't add belly fat.
+# BMI|Waist: p=0.009 (sig) — protein adds lean mass when fat is held constant.
+# Waist/BMI ratio: p=0.004 (sig) — more protein = more lean mass relative to body size.
+# CONCLUSION: BMI is a misleading outcome for protein. Use body composition measures instead.
+
+svy_bmi_plain <- svyglm(
+  BMXBMI ~ total_calories + total_sugar + total_fiber + total_protein +
+    PAD680 + total_activity_min + RIDAGEYR + Female,
+  design = nhanes_design
+)
+
+cat("=== Protein Effect Comparison ===\n")
+cat(sprintf("Protein -> BMI (no control):         coef=%.5f, p=%.4f\n",
+    coef(svy_bmi_plain)["total_protein"],
+    summary(svy_bmi_plain)$coefficients["total_protein",4]))
+cat(sprintf("Protein -> Waist:                    coef=%.5f, p=%.4f\n",
+    coef(svy_waist_main)["total_protein"],
+    summary(svy_waist_main)$coefficients["total_protein",4]))
+cat(sprintf("Protein -> BMI (controlling waist):  coef=%.5f, p=%.4f\n",
+    coef(svy_bmi_adj_waist)["total_protein"],
+    summary(svy_bmi_adj_waist)$coefficients["total_protein",4]))
+cat(sprintf("Protein -> Waist-to-BMI ratio:       coef=%.5f, p=%.4f\n",
+    coef(svy_ratio_main)["total_protein"],
+    summary(svy_ratio_main)$coefficients["total_protein",4]))
+```

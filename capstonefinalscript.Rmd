@@ -12,7 +12,7 @@ knitr::opts_chunk$set(echo = TRUE)
 library(survey)
 library(car)
 
-data <- read.csv("data/combined_data.csv")
+data <- read.csv("combined_data.csv")
 
 # Replace near-zero corrupted values (e.g. 5.397e-79) with NA across all numeric columns
 numeric_cols <- sapply(data, is.numeric)

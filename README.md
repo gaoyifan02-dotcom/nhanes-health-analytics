@@ -11,3 +11,10 @@ Reproduction workspace for the NHANES analysis from the University of Virginia A
 
    ```r
    install.packages(c("rmarkdown", "knitr", "survey", "car"))
+4. Click Knit to generate capstonefinalscript.html.
+The analysis uses a processed NHANES dataset with 6,751 participant
+records. The separate UVA campus survey is not included.
+Reproduction status
+The repository was downloaded and successfully knitted to HTML in
+RStudio. The regenerated estimates have not yet been checked against
+the original capstone report.

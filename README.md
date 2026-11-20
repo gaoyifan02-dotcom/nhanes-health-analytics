@@ -1,7 +1,12 @@
 # NHANES Health Analytics
 
 Reproduction workspace for the NHANES analysis from the University of Virginia Active Analytics team capstone. It explores associations of diet and physical activity with BMI, waist circumference, cholesterol, and fasting glucose. These are observational analyses.
+## Selected result
 
+In the survey-weighted BMI model, higher dietary fiber intake was
+associated with lower BMI (β = −0.095, p < 0.001). This is an
+observational association. The model in this repository uses a different
+set of covariates from the original capstone report.
 ## Run the analysis
 
 1. Download and unzip the repository.

@@ -1,6 +1,16 @@
 # NHANES Health Analytics
 
 Reproduction workspace for the NHANES analysis from the University of Virginia Active Analytics team capstone. It explores associations of diet and physical activity with BMI, waist circumference, cholesterol, and fasting glucose. These are observational analyses.
+## My contribution
+
+This project builds on a team capstone completed at the University
+of Virginia. Our team used NHANES data to study how dietary intake
+and physical activity were associated with metabolic health outcomes.
+
+For this repository, I reran the survey-weighted BMI model in R,
+documented how to reproduce the analysis, and added code that
+generates the dietary fiber coefficient plot and its 95% confidence
+interval.
 ## Selected result
 
 In the survey-weighted BMI model, higher dietary fiber intake was

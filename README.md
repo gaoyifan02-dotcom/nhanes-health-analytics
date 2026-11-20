@@ -4,12 +4,10 @@ Reproduction workspace for the NHANES analysis from the University of Virginia A
 
 ## Run the analysis
 
-1. Extract the project folder and open `capstonefinalscript.Rmd` in RStudio.
-2. In the R console, run `install.packages(c("rmarkdown", "knitr", "survey", "car"))`.
-3. Click **Knit** to generate the HTML report. Keep the R Markdown file next to the `data` folder.
+1. Download and unzip the repository.
+2. Open `capstonefinalscript.Rmd` in RStudio. Keep `combined_data.csv`
+   in the same folder as the R Markdown file.
+3. If needed, install the R packages:
 
-The input is a processed extract supplied with the project (6,751 participant rows and 143 columns). The original data preparation scripts are not included. The UVA survey is separate and is not included in this project.
-
-## Reproduction status
-
-The input path and required columns were checked. The R Markdown file has not been knitted in this workspace. The analysis preserves the original model settings; check the sampling weights for the fasting glucose analysis and compare results against the original report before citing them.
+   ```r
+   install.packages(c("rmarkdown", "knitr", "survey", "car"))
